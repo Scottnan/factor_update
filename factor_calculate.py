@@ -14,8 +14,9 @@ import pandas.tseries.offsets as toffsets
 from datetime import datetime, time
 from functools import reduce
 from itertools import takewhile, dropwhile
-from collections import Iterable
+from collections.abc import Iterable
 from WindPy import w
+from exchange_calendars import get_calendar
 warnings.filterwarnings('ignore')
 
 WORK_PATH = os.path.dirname(os.path.dirname(__file__))
@@ -39,11 +40,11 @@ class lazyproperty:
             return value
     
 class Data:
-    startday = "20060101"
-    endday = pd.tseries.offsets.datetime.now().strftime("%Y%m%d")
+    startday = "20240101"
+    endday = datetime.now().strftime("%Y%m%d")
     freq = "M"
     
-    root = WORK_PATH
+    root = "D:\\data\\test"
     metafile = 'all_stocks.xlsx'
     mmapfile = 'month_map.xlsx'
     month_group_file = 'month_group.xlsx'
@@ -277,20 +278,46 @@ class Data:
 
     def open_file(self, name):
         if name == 'meta':
-            return pd.read_excel(os.path.join(self.root, 'src', self.metafile), index_col=[0],
-                                 parse_dates=['ipo_date', "delist_date"], encoding='gbk')
+            try:
+                meta_data = pd.read_excel(os.path.join(self.root, 'src', self.metafile), index_col=[0],
+                                          parse_dates=['ipo_date', "delist_date"])
+            except FileNotFoundError:
+                res = w.wset("sectorconstituent", f"date={self.endday};sectorid=a001010100000000;field=wind_code,sec_name")
+                if res.ErrorCode != 0:
+                    raise WindQueryFailError("Updating meta data failed, errorcode={}".format(res.ErrorCode))
+                res = pd.DataFrame(res.Data, index=res.Fields).T.set_index(['wind_code'])
+
+                ipo_dates_append = self._get_data_from_windpy(res.index, "ipo_date", None, "ipodate")
+                meta_data = pd.concat([res.loc[res.index,], ipo_dates_append], axis=1)
+
+                meta_data['delist_date'] = self._get_data_from_windpy(meta_data.index,
+                                                                     "delist_date", f"{self.endday};{self.endday};",
+                                                                     'wsd-delist_date')
+                self.close_file(meta_data, 'meta')
+                print("Initial meta data complete.")
+
+            return meta_data
         elif name == 'month_map':
             return pd.read_excel(os.path.join(self.root, 'src', self.mmapfile), index_col=[0],
-                                 parse_dates=[0, 1], encoding='gbk')['calendar_date']
+                                 parse_dates=[0, 1])['calendar_date']
         elif name == 'trade_days_begin_end_of_month':
             return pd.read_excel(os.path.join(self.root, 'src', self.tdays_be_m_file), index_col=[1],
-                                 parse_dates=[0, 1], encoding='gbk')
+                                 parse_dates=[0, 1])
         elif name == 'month_group':
             return pd.read_excel(os.path.join(self.root, 'src', self.month_group_file), index_col=[0],
-                                 parse_dates=True, encoding='gbk')
+                                 parse_dates=True)
         elif name == 'tradedays':
-            return pd.read_excel(os.path.join(self.root, 'src', self.tradedays_file), index_col=[0],
-                                 parse_dates=True, encoding='gbk').index.tolist()
+            try:
+                trade_days = pd.read_excel(os.path.join(self.root, 'src', self.tradedays_file), index_col=[0],
+                                           parse_dates=True).index.tolist()
+            except FileNotFoundError:
+                trade_days = get_calendar("XSHG").schedule
+                # file_path = os.path.join(self.root, 'src', self.tradedays_file)
+                if not os.path.exists(os.path.join(self.root, 'src')):
+                    os.mkdir(os.path.join(self.root, 'src'))
+                self.close_file(trade_days, 'tradedays')
+                print("Initial tradedays data complete.")
+            return trade_days
         path = self.freqmap.get(name, None)
         if path is None:
             raise Exception(f'{name} is unrecognisable or not in file dir, please check and retry.')
@@ -308,17 +335,13 @@ class Data:
     
     def close_file(self, df, name, **kwargs):
         if name == 'meta':
-            df.to_excel(os.path.join(self.root, 'src', self.metafile), 
-                        encoding='gbk', **kwargs)
+            df.to_excel(os.path.join(self.root, 'src', self.metafile), **kwargs)
         elif name == 'month_map':
-            df.to_excel(os.path.join(self.root, 'src', self.mmapfile), 
-                        encoding='gbk', **kwargs)
+            df.to_excel(os.path.join(self.root, 'src', self.mmapfile), **kwargs)
         elif name == 'trade_days_begin_end_of_month':
-            df.to_excel(os.path.join(self.root, 'src', self.tdays_be_m_file),
-                        encoding='gbk', **kwargs)
+            df.to_excel(os.path.join(self.root, 'src', self.tdays_be_m_file), **kwargs)
         elif name == 'tradedays':
-            df.to_excel(os.path.join(self.root, 'src', self.tradedays_file),
-                        encoding='gbk', **kwargs)
+            df.to_excel(os.path.join(self.root, 'src', self.tradedays_file), **kwargs)
         else:
             path = self.freqmap.get(name, None)
             if path is None:
@@ -335,6 +358,44 @@ class Data:
             df.to_csv(os.path.join(path, name+'.csv'), encoding='gbk', **kwargs)
             self.__update_frepmap()
         self.__update_attr(name)
+
+    @staticmethod
+    def _get_data_from_windpy(stocks, indicators, conds, datatype):
+        indicators = indicators.replace('industry_citic_level2', 'industry2')
+        indicators = indicators.replace('industry_citic', 'industry2')
+        if isinstance(stocks, Iterable) and not isinstance(stocks, str):
+            stocks = ",".join(stocks)
+        if isinstance(indicators, Iterable) and not isinstance(indicators, str):
+            indicators = ",".join(indicators)
+
+        if datatype.startswith('wsd'):
+            conds = conds.split(";")
+            if len(conds) == 3:
+                res = w.wsd(stocks, indicators, *conds)
+            else:
+                startdate, enddate, *cons = conds
+                cons = ";".join(cons)
+                res = w.wsd(stocks, indicators, startdate, enddate, cons)
+        else:
+            res = w.wss(stocks, indicators, conds)
+
+        if res.ErrorCode != 0:
+            msg = "Query {} data from windpy failed, errorcode={}.".format(datatype, res.ErrorCode)
+            print(stocks[:9], indicators, conds, res.ErrorCode)
+            raise WindQueryFailError(msg)
+
+        dat = pd.DataFrame(res.Data).T
+        dat.columns = list(map(lambda x: str(x).lower(), res.Fields))
+
+        if datatype.startswith('wsd'):
+            try:
+                dat.index = res.Times
+            except ValueError:
+                dat.index = res.Codes
+        else:
+            dat.index = res.Codes
+            dat.index.name = "code"
+        return dat
     
 #    @staticmethod
 #    def _fill_nan(series, value=0, ffill=False):
@@ -1400,14 +1461,15 @@ class FactorProcess:
             dat.index = res.Codes
             dat.index.name = "code"
         return dat
-    
+
+
 if __name__ == "__main__":
-    updatefreq = input("Choose update frequency between 'w' and 'M': ")
+    updatefreq = "w"
     z = FactorProcess(updatefreq)
     if updatefreq == 'M':
         dates = [d for d in z.month_map.keys()][-2:]
     elif updatefreq == 'w':
-        lastThursday =  toffsets.datetime.now()
+        lastThursday = toffsets.datetime.now()
         daydelta = toffsets.DateOffset(n=1)
         while lastThursday.weekday() != calendar.THURSDAY:
             lastThursday -= daydelta

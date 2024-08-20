@@ -11,11 +11,12 @@ import calendar
 import numpy as np
 import pandas as pd
 import pandas.tseries.offsets as toffsets
+from datetime import datetime
 from WindPy import w
 from functools import wraps
 from factor_calculate import FactorProcess, WindQueryFailError
 
-START_YEAR = 2006
+START_YEAR = 2024
 
 FPATH = os.path.dirname(os.path.dirname(__file__))
 MPATH = os.path.join(FPATH, "monthly_data")
@@ -145,7 +146,7 @@ class UpdateOriginData(FactorProcess):
             
     def update_month_map_data(self, cur_date=None):
         if cur_date is None:
-            cur_date = toffsets.datetime.now().date()
+            cur_date = datetime.today().date()
         lst_date = self.month_map.index[-1]
         
         if cur_date.year == lst_date.year:
@@ -157,7 +158,7 @@ class UpdateOriginData(FactorProcess):
             update = False
             
         if update:
-            lst_date += toffsets.timedelta(weeks=2)
+            lst_date += toffsets.DateOffset(weeks=2)
             new_tdays = self._get_trade_days(lst_date, cur_date, "M")
             if len(new_tdays) > 1:
                 new_tdays = new_tdays[:-1]
@@ -203,7 +204,7 @@ class UpdateOriginData(FactorProcess):
 
     def update_meta_data(self, date=None):
         if date is None:
-            date = toffsets.datetime.now().date()
+            date = datetime.today().date()
         lsttdate = self._get_date(date, datelist=self.tradedays)
         date = str(lsttdate)[:10]
         ori_meta = getattr(self, "meta",).copy()
@@ -275,6 +276,7 @@ class UpdateOriginData(FactorProcess):
             ori_periods = ori_data.columns.sort_values()
             ori_sdate, ori_edate = ori_periods[0], ori_periods[-1]
         except:
+            # start_date =
             raise Exception(f'{fname} not found or specific error encountered while parsing data structure.')
             
         if start_date and end_date:
@@ -743,7 +745,7 @@ class UpdateOriginData(FactorProcess):
 
 if __name__ == '__main__':
     w.start()
-    updatefreq = input("Choose update frequency between 'w' and 'M': ")
+    updatefreq = 'M'
     z = UpdateOriginData(updatefreq, update_only=True)
     z.update_meta_data()
     if updatefreq == 'M':
