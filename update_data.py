@@ -63,7 +63,7 @@ class UpdateOriginData(FactorProcess):
             
         listday_dat = pd.DataFrame(index=all_stocks_info.index, columns=trade_days)
         listday_dat = listday_dat.apply(if_listed, axis=1)
-        self.close_file(listday_dat, 'listday_matrix')
+        self.close_file(listday_dat, 'listday_matrix', set_path=self.dpath)
 
     def show_message(self, st):
         *_, size, atime, mtime, ctime = st
@@ -115,7 +115,7 @@ class UpdateOriginData(FactorProcess):
         
     def update_all(self):
         w.start()
-        date = toffsets.datetime.now().date()
+        date = datetime.today().date()
         self.make_backup(dirname='src')
         try:
             self.update_meta_data(date)
@@ -242,7 +242,7 @@ class UpdateOriginData(FactorProcess):
         new_cols = []
         for date in tdays[::-1]:
             if date in ori_data.columns or ((date in self.month_map.index) and \
-                                (self.month_map[date] in ori_data.columns)):
+                                (self.month_map.loc[date] in ori_data.columns)):
                 continue
             qdate = "".join(str(date)[:10].split("-"))
             try:
@@ -276,8 +276,12 @@ class UpdateOriginData(FactorProcess):
             ori_periods = ori_data.columns.sort_values()
             ori_sdate, ori_edate = ori_periods[0], ori_periods[-1]
         except:
-            # start_date =
-            raise Exception(f'{fname} not found or specific error encountered while parsing data structure.')
+
+            ori_sdate = EMPTY_START_DATE
+            ori_edate = EMPTY_START_DATE
+            ori_data = None
+            print(f"Initial {fname} data.")
+            # raise Exception(f'{fname} not found or specific error encountered while parsing data structure.')
             
         if start_date and end_date:
             start_date, end_date = pd.to_datetime((start_date, end_date))
@@ -289,7 +293,7 @@ class UpdateOriginData(FactorProcess):
             update_past = False
         else:
             lst_date = ori_edate 
-            curdate = toffsets.datetime.now().date() 
+            curdate = datetime.today().date() 
             tdays = self._get_trade_days(lst_date, curdate, freq=freq)
             if len(tdays) < 1:
                 return None, None
@@ -302,12 +306,14 @@ class UpdateOriginData(FactorProcess):
                           (freq == 'M' and (new_date.month - lst_date.month) <= 1) or \
                           (freq == 'd')
             
-            if update_past:
-                sec_lst_date = ori_periods[-2]
-                del ori_data[lst_date]
-                del ori_data[sec_lst_date]
-                
-            lst_date = ori_data.columns[-1]
+            # if update_past:
+            #     sec_lst_date = ori_periods[-2]
+            #     del ori_data[lst_date]
+            #     del ori_data[sec_lst_date]
+            if ori_data is None:
+                lst_date = EMPTY_START_DATE
+            else:
+                lst_date = ori_data.columns[-1]
             tdays = self._get_trade_days(lst_date, new_date, freq=freq)
             
             if stockslist is None:
@@ -440,14 +446,14 @@ class UpdateOriginData(FactorProcess):
                                             applymap(lambda x: 0 if x != '交易' else 1)
                 elif qname == 'pct_chg' or qname == 'turn':
                     new_data.loc[:, new_cols] = new_data.loc[:, new_cols] / 100
-                self.close_file(new_data, qname)
+                self.close_file(new_data, qname, set_path=self.dpath)
                 print("\"{}\" data updated to date {}.".format(qname, str(new_date)[:10]))
             else:
                 print(f"\"{qname}\"'s data don't need to be updated.")
         
         close, adjfactor = self._align_element(self.close, self.adjfactor)
         hfq_close = close * adjfactor
-        self.close_file(hfq_close, 'hfq_close')
+        self.close_file(hfq_close, 'hfq_close', set_path=self.dpath)
         print("\'hfq_close\' updated.")
         
         self.get_listday_matrix()
@@ -466,28 +472,35 @@ class UpdateOriginData(FactorProcess):
         if self.updatefreq == 'w':
             datelist = hfq_close.columns.tolist()
             
-            lastThursday =  toffsets.datetime.now()
+            lastThursday =  datetime.today()
             daydelta = toffsets.DateOffset(n=1)
             while lastThursday.weekday() != calendar.THURSDAY:
                 lastThursday -= daydelta
-
-            profit_ttm_G_d = self.profit_ttm_G_d
-            update_dates = hfq_close.loc[:, profit_ttm_G_d.columns[-1]:lastThursday].columns[1:]
+            try:
+                profit_ttm_G_d = self.profit_ttm_G_d
+                update_dates = hfq_close.loc[:, profit_ttm_G_d.columns[-1]:lastThursday].columns[1:]
+            except Exception:
+                update_dates = datelist
+                profit_ttm_G_d = pd.DataFrame()
             yoy = pd.DataFrame()
             for date in update_dates:
-                lstdate = toffsets.datetime(date.year-1, date.month, date.day)
-                lstdate = self._get_date(lstdate, 0, datelist)
+                lstdate = datetime(date.year-1, date.month, date.day)
+                lstdate = self._get_date(lstdate, 0, datelist)     # 可能会有问题，不稳健的获取去年数据的方法，第一年获取不到容易出问题
                 yoy[date] = self.profit_ttm_d[date] / self.profit_ttm_d[lstdate] - 1
             profit_ttm_G_d = pd.concat([profit_ttm_G_d, yoy], axis=1)
             profit_ttm_G_d = profit_ttm_G_d[profit_ttm_G_d.columns.sort_values()]
-            self.close_file(profit_ttm_G_d, 'profit_ttm_G_d')
+            self.close_file(profit_ttm_G_d, 'profit_ttm_G_d', set_path=self.dpath)
             print("'profit_ttm_G_d' updated.")
 
-            for offset in [1,3,6,12]:   
-                pctchg_d = getattr(self, f'pctchg_{offset}M_d', )
+            for offset in [1,3,6,12]:
+                try:
+                    pctchg_d = getattr(self, f'pctchg_{offset}M_d', )
+                    update_dates = hfq_close.loc[:, pctchg_d.columns[-1]:lastThursday].columns[1:]
+                except Exception:
+                    pctchg_d = pd.DataFrame()
+                    update_dates = datelist
                 res = pd.DataFrame()
 
-                update_dates = hfq_close.loc[:, pctchg_d.columns[-1]:lastThursday].columns[1:]
                 for date in update_dates:    
                     if offset == 12:
                         lstyear = date.year - 1
@@ -500,13 +513,13 @@ class UpdateOriginData(FactorProcess):
                             lstyear = date.year - 1
                             lstmonth = date.month - offset + 12
                         lstday = min(date.day, calendar.monthrange(lstyear, lstmonth)[1])
-                    lstdate = toffsets.datetime(lstyear, lstmonth, lstday)
+                    lstdate = datetime(lstyear, lstmonth, lstday)
                     lstdate = self._get_date(lstdate, 0, datelist)
                     res[date] = hfq_close[date] / hfq_close[lstdate] - 1
                 
                 pctchg_d = pd.concat([pctchg_d, res], axis=1)
                 pctchg_d = pctchg_d[pctchg_d.columns.sort_values()]
-                self.close_file(pctchg_d, f'pctchg_{offset}M_d')
+                self.close_file(pctchg_d, f'pctchg_{offset}M_d', set_path=self.dpath)
                 print(f"'pctchg_{offset}M_d' updated.")
         
     @backup_decorator(dirname='monthly_data')
@@ -520,7 +533,7 @@ class UpdateOriginData(FactorProcess):
 #        self.update_quarterly_data()
 #        self.qdata_to_mdata((start_date and end_date))
 #        
-        curdate = toffsets.datetime.now().date() if date is None else date
+        curdate = datetime.today().date() if date is None else date
         ndate = curdate - toffsets.MonthEnd(n=1)
         for qname in inds_to_update:
             new_cols, new_data = self.update_ori_data(qname, 'M', stockslist, date,
@@ -586,7 +599,7 @@ class UpdateOriginData(FactorProcess):
             'qfa_yoyprofit', 'qfa_yoysales', 'roa2_ttm2', 'roe_ttm2', 'stm_issuingdate',
             'turnover_ttm', 'tot_equity', 'tot_liab', 'tot_assets', 'other_equity_instruments_PRE')
 
-        curdate = toffsets.datetime.now().date() if date is None else date
+        curdate = datetime.today().date() if date is None else date
         offset = curdate.month % 3 if (curdate.month % 3 != 0) else (curdate.month % 3 + 3)
         ndate = curdate - toffsets.MonthEnd(n=offset)
         
@@ -744,8 +757,10 @@ class UpdateOriginData(FactorProcess):
             return pd.NaT 
 
 if __name__ == '__main__':
+    global EMPTY_START_DATE
+    EMPTY_START_DATE = pd.to_datetime("2024-08-01")
     w.start()
-    updatefreq = 'M'
+    updatefreq = 'w'
     z = UpdateOriginData(updatefreq, update_only=True)
     z.update_meta_data()
     if updatefreq == 'M':

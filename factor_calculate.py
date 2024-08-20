@@ -298,8 +298,23 @@ class Data:
 
             return meta_data
         elif name == 'month_map':
-            return pd.read_excel(os.path.join(self.root, 'src', self.mmapfile), index_col=[0],
-                                 parse_dates=[0, 1])['calendar_date']
+            try:
+                month_map = pd.read_excel(os.path.join(self.root, 'src', self.mmapfile), index_col=[0],
+                                          parse_dates=[0, 1])['calendar_date']
+            except FileNotFoundError:
+                start_date = self.tradedays[0]
+                end_date = self.tradedays[-1]
+                tdays = pd.Series(index=self.tradedays).resample("M").asfreq().index.map(self.get_last_trading_day)
+                tdays = tdays[(tdays >= start_date) & (tdays <= end_date)]
+                if len(tdays) > 1:
+                    tdays = tdays[:-1]
+                caldays = [self._get_month_end(tdate) for tdate in tdays]
+                month_map = pd.Series(caldays, index=tdays).reset_index()
+                # month_map = self.month_map.append(dates).reset_index()
+                month_map.columns = ["trade_date", "calendar_date"]
+                month_map.set_index(['trade_date'], inplace=True)
+                self.close_file(month_map, 'month_map')
+            return month_map
         elif name == 'trade_days_begin_end_of_month':
             return pd.read_excel(os.path.join(self.root, 'src', self.tdays_be_m_file), index_col=[1],
                                  parse_dates=[0, 1])
@@ -322,8 +337,7 @@ class Data:
         if path is None:
             raise Exception(f'{name} is unrecognisable or not in file dir, please check and retry.')
         try:
-            dat = pd.read_csv(os.path.join(path, name+'.csv'), 
-                              index_col=[0], engine='python', encoding='gbk')
+            dat = pd.read_excel(os.path.join(path, name+'.xlsx'), index_col=0, parse_dates=True)
         except TypeError:
             print(name, path)
             raise
@@ -343,7 +357,10 @@ class Data:
         elif name == 'tradedays':
             df.to_excel(os.path.join(self.root, 'src', self.tradedays_file), **kwargs)
         else:
-            path = self.freqmap.get(name, None)
+            if kwargs.get("set_path", False):
+                path = kwargs.get("set_path")
+            else:
+                path = self.freqmap.get(name, None)
             if path is None:
                 if 'lyr' in name or '_m' in name:
                     path = self.mpath
@@ -355,10 +372,65 @@ class Data:
                     path = self.root
             if name in ['stm_issuingdate', 'applied_rpt_date_M']:
                 df = df.replace(0, pd.NaT)
-            df.to_csv(os.path.join(path, name+'.csv'), encoding='gbk', **kwargs)
+            df.to_excel(os.path.join(path, name+'.xlsx'))
             self.__update_frepmap()
         self.__update_attr(name)
 
+    @staticmethod
+    def get_last_trading_day(ref_date, delay=0):
+        calendar = get_calendar("XSHG")
+        raw = calendar.schedule
+        if isinstance(ref_date, str):
+            ref_date = datetime.strptime(ref_date, "%Y-%m-%d")
+        raw = raw[raw.index <= ref_date]
+        raw = raw.sort_index(ascending=False)
+        result = raw.iloc[delay]
+        return result.name
+    # duplicates functions
+    def _get_month_end(self, date):
+        _, days = calendar.monthrange(date.year, date.month)
+        if date.day == days:
+            return date
+        else:
+            return date + toffsets.MonthEnd(n=1)
+
+    # duplicates functions
+    def _get_trade_days(self, startday, endday, freq=None):
+        if freq is None:
+            freq = self.freq
+        startday, endday = pd.to_datetime((startday, endday))
+        # try:
+        #     self.__update_tradedays()
+        # except WindQueryFailError:
+        #     print("Update tradedays list from wind failed...trying continue")
+        #     pass
+        if freq == 'd':
+            try:
+                start_idx = self._get_date_idx(startday, self.tradedays)
+            except IndexError:
+                return []
+            else:
+                try:
+                    end_idx = self._get_date_idx(endday, self.tradedays)
+                except IndexError:
+                    return self.tradedays[start_idx:]
+                else:
+                    return self.tradedays[start_idx:end_idx+1]
+        else:
+            new_cdays_curfreq = pd.Series(index=self.tradedays).resample(freq).asfreq().index
+            c_to_t_dict = {cday:tday for tday, cday in self.month_map.to_dict().items()}
+            try:
+                new_tdays_curfreq = [c_to_t_dict[cday] for cday in new_cdays_curfreq]
+            except KeyError:
+                new_tdays_curfreq = [c_to_t_dict[cday] for cday in new_cdays_curfreq[:-1]]
+            start_idx = self._get_date_idx(c_to_t_dict.get(startday, startday), new_tdays_curfreq) + 1
+            try:
+                end_idx = self._get_date_idx(c_to_t_dict.get(endday, endday), new_tdays_curfreq)
+            except IndexError:
+                end_idx = len(new_tdays_curfreq) - 1
+            return new_tdays_curfreq[start_idx:end_idx+1]
+
+    # duplicates functions
     @staticmethod
     def _get_data_from_windpy(stocks, indicators, conds, datatype):
         indicators = indicators.replace('industry_citic_level2', 'industry2')
@@ -396,6 +468,28 @@ class Data:
             dat.index = res.Codes
             dat.index.name = "code"
         return dat
+
+
+    def _get_date_idx(self, date, datelist=None, ensurein=False):
+        msg = """Date {} not in current tradedays list. If this date value is certainly a tradeday,  
+              please reset tradedays list with longer periods or higher frequency."""
+        date = pd.to_datetime(date)
+        if datelist is None:
+            datelist = self.trade_days
+        try:
+            datelist = sorted(datelist)
+            idx = datelist.index(date)
+        except ValueError:
+            if ensurein:
+                raise IndexError(msg.format(str(date)[:10]))
+            dlist = list(datelist)
+            dlist.append(date)
+            dlist.sort()
+            idx = dlist.index(date)
+            if idx == len(dlist)-1:
+                raise IndexError(msg.format(str(date)[:10]))
+            return idx - 1
+        return idx
     
 #    @staticmethod
 #    def _fill_nan(series, value=0, ffill=False):
@@ -449,7 +543,7 @@ class FactorProcess:
     
     def __update_tradedays(self):
         startday = self.tradedays[-1] + toffsets.DateOffset(1)
-        endday = datetime.combine(toffsets.datetime.now(), time.min)
+        endday = datetime.combine(datetime.today(), time.min)
         startday, endday = str(startday)[:10], str(endday)[:10]
         res = w.tdays(startday, endday, "")
         if res.ErrorCode != 0:
@@ -515,6 +609,8 @@ class FactorProcess:
     def open_file(self, path):
         if path.endswith('.csv'):
             return pd.read_csv(path, encoding='gbk', index_col=[1], engine='python')
+        elif path.endswith('.xlsx'):
+            return pd.read_excel(path)
         else:
             raise TypeError("Unsupportted type {}, only support csv currently.".format(path.split('.')[-1]))
     
@@ -1469,7 +1565,7 @@ if __name__ == "__main__":
     if updatefreq == 'M':
         dates = [d for d in z.month_map.keys()][-2:]
     elif updatefreq == 'w':
-        lastThursday = toffsets.datetime.now()
+        lastThursday = datetime.today()
         daydelta = toffsets.DateOffset(n=1)
         while lastThursday.weekday() != calendar.THURSDAY:
             lastThursday -= daydelta
